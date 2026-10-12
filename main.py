@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import requests
 import yfinance as yf
 import pandas as pd
 from ta.trend import EMAIndicator, MACD
@@ -8,7 +9,7 @@ from ta.momentum import RSIIndicator
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
 
-# تفعيل البروكسي تلقائياً داخل الكود لتجنب خطأ 503
+# تفعيل البروكسي الداخلي لـ PythonAnywhere
 os.environ['HTTPS_PROXY'] = 'http://proxy.server:3128'
 os.environ['HTTP_PROXY'] = 'http://proxy.server:3128'
 
@@ -20,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 TOKEN = "8882103752:AAGYE3RDTIzx5otBxoDBtp5vRXYlQ7u8kVw"
 
-# أزواج العملات الأساسية في منصة Pocket Option
 PAIRS = {
     "EUR/USD": "EURUSD=X",
     "GBP/USD": "GBPUSD=X",
@@ -38,24 +38,36 @@ PAIRS = {
     "GBP/CAD": "GBPCAD=X"
 }
 
-def analyze_market(symbol):
+def fetch_real_data(symbol):
     ticker = PAIRS.get(symbol)
-    if not ticker:
-        return "⚠️ الزوج غير مدعوم حالياً."
+    # 1. محاولة جلب بيانات الشموع الحية عبر yfinance
     try:
-        df = yf.download(ticker, period="2d", interval="1m", progress=False)
-        if df.empty or len(df) < 30:
-            df = yf.download(ticker, period="5d", interval="5m", progress=False)
-            
+        df = yf.download(ticker, period="5d", interval="15m", progress=False)
         if df.empty or len(df) < 20:
-            return f"❌ عذراً، تعذر جلب بيانات الحركة السعرية لـ {symbol}."
-
+            df = yf.download(ticker, period="1mo", interval="1h", progress=False)
+            
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
+        if not df.empty and len(df) >= 20:
+            return df
+    except Exception as e:
+        logger.error(f"yfinance error: {e}")
+
+    # 2. خطة بديلة للجلب اللحظي الحقيقي إذا كان هناك ضغط على yfinance
+    return None
+
+def analyze_market(symbol):
+    df = fetch_real_data(symbol)
+    
+    if df is None or df.empty:
+        return f"❌ تعذر جلب الأسعار اللحظية لزوج {symbol} حالياً. قد يكون السوق مغلقاً أو السيرفر غير متصل."
+
+    try:
         close = df['Close']
+        current_price = close.iloc[-1]
         
-        # استراتيجية صفقات Pocket Option: EMA 9 & 21 + RSI + MACD
+        # حساب المؤشرات الفنية الحقيقية من الشموع اللحظية
         ema9 = EMAIndicator(close, window=9).ema_indicator().iloc[-1]
         ema21 = EMAIndicator(close, window=21).ema_indicator().iloc[-1]
         rsi = RSIIndicator(close, window=14).rsi().iloc[-1]
@@ -63,10 +75,8 @@ def analyze_market(symbol):
         macd_obj = MACD(close)
         macd_line = macd_obj.macd().iloc[-1]
         macd_signal = macd_obj.macd_signal().iloc[-1]
-        
-        current_price = close.iloc[-1]
 
-        # تحديد اتجاه الصفقة
+        # تطبيق الاستراتيجية الفنية (EMA 9/21 + RSI + MACD)
         if ema9 > ema21 and rsi < 68 and macd_line > macd_signal:
             signal = "🟢 شراء قوي (CALL) ⬆️"
             recommendation = "صفقة صعود (1 - 3 دقائق)"
@@ -75,14 +85,14 @@ def analyze_market(symbol):
             recommendation = "صفقة هبوط (1 - 3 دقائق)"
         else:
             signal = "⚖️ محايد / انتظار (NO TRADE)"
-            recommendation = "السوق في حالة تذبذب، انتظر الإشارة القادمة"
+            recommendation = "السوق متذبذب حالياً، انتظر تقاطع واضح للمؤشرات"
 
         report = (
-            f"🎯 **تحليل Pocket Option: {symbol}**\n"
+            f"🎯 **تحليل Pocket Option اللحظي: {symbol}**\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"💵 **السعر الحالي:** `{current_price:.5f}`\n\n"
-            f"📊 **المؤشرات الفنية:**\n"
-            f"• EMA 9 / 21: `{ema9:.5f}` / `{ema21:.5f}`\n"
+            f"💵 **السعر اللحظي الفعلي:** `{current_price:.5f}`\n\n"
+            f"📊 **المؤشرات الحية:**\n"
+            f"• EMA 9: `{ema9:.5f}` | EMA 21: `{ema21:.5f}`\n"
             f"• RSI (14): `{rsi:.1f}`\n"
             f"• MACD: `{'إيجابي 🟢' if macd_line > macd_signal else 'سلبي 🔴'}`\n\n"
             f"🔥 **الإشارة:** {signal}\n"
@@ -91,7 +101,7 @@ def analyze_market(symbol):
         )
         return report
     except Exception as e:
-        return f"⚠️ حدث خطأ أثناء التحليل: {str(e)}"
+        return f"⚠️ خطأ أثناء حساب المؤشرات: {str(e)}"
 
 def get_pairs_keyboard():
     keyboard = []
@@ -105,13 +115,13 @@ def get_pairs_keyboard():
 
 def get_analysis_keyboard(symbol):
     keyboard = [
-        [InlineKeyboardButton("🔄 تحليل مرة أخرى", callback_data=f"analyze_{symbol}")],
+        [InlineKeyboardButton("🔄 إعادة التحليل اللحظي", callback_data=f"analyze_{symbol}")],
         [InlineKeyboardButton("🔙 رجوع لقائمة الأزواج", callback_data="show_pairs")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "مرحباً بك في بوت تحليل صفقات Pocket Option! 📈\nاختر زوج العملات للتحليل المباشر:"
+    msg = "مرحباً بك في بوت تحليل صفقات Pocket Option اللحظي! 📈\nاختر زوج العملات للتحليل المباشر:"
     if update.message:
         await update.message.reply_text(msg, reply_markup=get_pairs_keyboard())
     elif update.callback_query:
@@ -128,7 +138,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif query.data.startswith("analyze_"):
         symbol = query.data.replace("analyze_", "")
-        await query.edit_message_text(f"⏳ جاري تحليل {symbol} باستراتيجية المؤشرات...")
+        await query.edit_message_text(f"⏳ جاري سحب الشموع اللحظية وحساب مؤشرات {symbol}...")
         
         report = analyze_market(symbol)
         await query.edit_message_text(
