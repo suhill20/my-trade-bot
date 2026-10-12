@@ -6,7 +6,11 @@ import pandas as pd
 from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
+
+# تفعيل البروكسي تلقائياً داخل الكود لتجنب خطأ 503
+os.environ['HTTPS_PROXY'] = 'http://proxy.server:3128'
+os.environ['HTTP_PROXY'] = 'http://proxy.server:3128'
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
